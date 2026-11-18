@@ -81,3 +81,18 @@ Admin Panel's Recheck Preflight.
   local snapshots alone do not constitute independent disaster recovery.
 - A live update needs a fresh approval and maintenance window. No browser
   backup/restore/update action should be used as a shortcut for production GO.
+
+## AU-01/UI-01 — Display-only consistency
+
+- In Docker Compose mode, the System Update installation header displays the
+  canonical `vibtoolshq/ReadBox` repository instead of the legacy
+  `vibtools/ReadBox` environment alias. Non-Docker installations preserve
+  their existing repository display behavior.
+- After a verified Docker source-channel check, the **System is Up to Date**
+  modal displays the current host Git SHA (first 12 hex characters), exactly
+  as the Current Version card does, rather than the package `0.1.0` version.
+  A missing verified host SHA displays `Unknown`, never a misleading package
+  version. The legacy stable-release dialog continues to display its semantic
+  package version unchanged.
+- This is a UI-only source correction: no update execution, Docker build,
+  host updater changes, production VPS deployment, mailserver or R2 actions.

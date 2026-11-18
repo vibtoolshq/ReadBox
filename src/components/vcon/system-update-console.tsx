@@ -694,7 +694,9 @@ export function SystemUpdateConsole({
           <DialogDescription>
             You are already running the latest version (
             <span id="modal-current-version" className="font-mono">
-              {currentVersion}
+              {releaseMode === "source"
+                ? (currentSha || "Unknown").slice(0, 12)
+                : currentVersion}
             </span>
             ).
           </DialogDescription>
