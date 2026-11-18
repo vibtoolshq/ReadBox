@@ -6,7 +6,10 @@ RSA-2048 keys and public TXT DNS; it **does not sign or send email**. Frozen
 baseline: ea14efa5b5571b0ed1e00e211e07a7862f2b6a0f.
 
 ## Isolation
-- New non-networked `dkim-provisioner`: Python/OpenSSL, UID/GID 1001,
+- Opt-in profile `dkim` enables the non-networked `dkim-provisioner`;
+  default Compose/mailserver services remain exactly unchanged. The agent is
+  installed later only with explicit VPS approval and private-key custody.
+- Non-networked `dkim-provisioner`: Python/OpenSSL, UID/GID 1001,
   read-only rootfs, no Linux capabilities/privileges, no ports, no Docker socket.
 - The **private** `readbox_dkim_private` volume is mounted only into
   this service, never web, worker, Postfix or Dovecot. Keys are 0600.

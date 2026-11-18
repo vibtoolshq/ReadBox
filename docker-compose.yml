@@ -42,8 +42,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      dkim-provisioner:
-        condition: service_healthy
     environment:
       NODE_ENV: production
       DOCKER_RUNTIME: "true"
@@ -216,6 +214,7 @@ services:
   # DKIM-01: no network, no SMTP signer, no DNS provider credentials.
   # Only this container can mount persistent PRIVATE key material.
   dkim-provisioner:
+    profiles: ["dkim"]
     build:
       context: .
       dockerfile: deployment/dkim/Dockerfile
