@@ -208,3 +208,23 @@ The isolated image build was carried out in a temporary checkout on the VPS host
 | Tags, releases, stable production readiness | excluded; existing production release NO-GO | **NO ACTION** |
 
 Build-only PASS does not establish a running healthy provisioner or recovered private keys. Stopped unhealthy provisioner was not restarted in this FIX-02 source phase.
+
+
+## DKIM-03 — Focused CI and source-gate record (2026-11-18)
+
+| Gate | Evidence | Result |
+|---|---|---|
+| Frozen source/mirror/local main | `d2faedcebd302f488c515daba57441f59ff3a687` | PASS |
+| Candidate identical code tree | `4cccc52ea7d92bdaf4a06b27fc15a8039aae8036` | PASS |
+| GitHub original focused CI | [#44293943849](https://github.com/JILLU-Games/ReadBox/actions/runs/44293943849) | FAIL: receipt Python SyntaxError |
+| Minimal one-file repair | corrected receipt `try`/mode under umask 077 | APPLIED |
+| One necessary focused CI recheck | [#44294483799](https://github.com/JILLU-Games/ReadBox/actions/runs/44294483799) exact tested mirror `bac871825fee87dda6a3bf74915832bee6ca4c5a` | **SUCCESS** |
+| Disposable real age + mocked immutable R2 cases | wrong identity, tamper, lost ACK, interruption, conflict, idempotency, complete original-volume loss | **11/11 PASS** |
+| Agent Docker RSA/receipt/public conflict tests | fresh Docker build + no-root read smoke | **8/8 PASS** |
+| Exact production Scope Lock | seven approved code/doc paths plus `notes/003–007` | PASS at tested candidate; audit final notes diff at closure |
+| Final Git main parity and clean local | verify non-force exact SHA/tree | PENDING final ref check |
+| Real production R2, private identity escrow and host-loss verification | separate operator approval/host proof | **NOT RUN** |
+| Live DKIM key generation, TXT DNS, VPS deployment | explicitly excluded | **NOT RUN** |
+| Tag, stable release, production GO | excluded | **NO-GO** |
+
+No second optional CI loop: after the syntax defect, only the necessary single focused recheck was performed. Notes-only closure does not create runtime proof. Fail closed on an unsupported R2 conditional PUT or missing independent identity custody.

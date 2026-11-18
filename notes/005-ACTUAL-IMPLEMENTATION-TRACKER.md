@@ -168,3 +168,23 @@ Frozen baseline `69b7f4c91100dd30c83ab56b24c29a4a0a9384b1`; tested implementatio
 | Encrypted private-key escrow/recovery and domain DKIM generation/DNS | **NOT RUN — safety gate remains** |
 
 Frozen baseline `ebb2e2bddd0ef26671b283a4f71bc4d35bb32dbd`; code tree `d34e6b539e7ba3aae3a2f03f8046a5f2821dcfcf`. This is a runtime image permission compatibility fix, not outbound signing or DNS publishing.
+
+
+## DKIM-03 — Implemented versus not-run features (2026-11-18)
+
+| Contract | State |
+|---|---|
+| Offline DKIM key staging without public TXT before escrow | **IMPLEMENTED / disposable agent tests PASS** |
+| Per-domain root-issued SHA/fingerprint-bound immutable R2 receipt gate | **IMPLEMENTED / negative tests PASS** |
+| Host-only existing age recipient/identity plus protected R2 credentials reuse | **IMPLEMENTED; no real credentials accessed in CI** |
+| Fixed `readbox/dkim-escrow/v1/<domain>/<private SHA256>.age` immutable object | **IMPLEMENTED; mocked R2 verified** |
+| Local age decrypt + bounded remote ciphertext readback + public RSA fingerprint | **11/11 disposable escrow tests PASS** |
+| Lost upload ACK, interrupted upload, existing object conflict, crash-before-receipt | **PASS in mocked R2 cases** |
+| New disposable volume recovery after original key/receipt deletion | **PASS; no production restore path** |
+| Existing agent Docker RSA regression and non-root smoke | **8/8 tests + Docker build PASS** |
+| Existing R05/BR04 managed backups, UI/auth/Prisma/mailserver/Compose | **UNCHANGED** |
+| Real Cloudflare R2 API conditional PUT/GET and independent age-key custody | **NOT RUN; requires separately authorized operator acceptance** |
+| VPS DKIM03 source deploy / live key / real DNS / outbound signer | **NOT RUN** |
+
+Exact verified tested code tree: `4cccc52ea7d92bdaf4a06b27fc15a8039aae8036`.
+Final notes-only closure commits change documentation, not the tested code or frozen release gate.
