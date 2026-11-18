@@ -43,6 +43,25 @@ class KeyTests(unittest.TestCase):
         with self.assertRaisesRegex(agent.Refused, "PUBLIC_KEY_CONFLICT"):
             agent.provision("example.test")
 
+    def test_openssl_legacy_and_v3_rsa_size_headers(self):
+        for header in (b"Private-Key: (2048 bit)\n",
+                       b"Private-Key: (2048 bit, 2 primes)\n"):
+            with self.subTest(header=header):
+                with mock.patch.object(agent, "cmd", side_effect=[header, b"TEST_DER"]) as runner:
+                    result = agent.key_material(pathlib.Path("/disposable/mock-private.pem"))
+                    self.assertEqual(result, agent.base64.b64encode(b"TEST_DER").decode("ascii"))
+                    self.assertEqual(runner.call_count, 2)
+
+    def test_weak_or_malformed_rsa_headers_still_fail_closed(self):
+        for header in (b"Private-Key: (1024 bit)\n",
+                       b"Private-Key: (1024 bit, 2 primes)\n",
+                       b"Private-Key: (2048 bit, invalid suffix)\n"):
+            with self.subTest(header=header):
+                with mock.patch.object(agent, "cmd", return_value=header) as runner:
+                    with self.assertRaisesRegex(agent.Refused, "INVALID_PRIVATE_KEY"):
+                        agent.key_material(pathlib.Path("/disposable/mock-private.pem"))
+                    self.assertEqual(runner.call_count, 1)
+
     def test_symlinks_and_traversal_rejected(self):
         with self.assertRaisesRegex(agent.Refused, "INVALID_DOMAIN"):
             agent.provision("../unsafe")

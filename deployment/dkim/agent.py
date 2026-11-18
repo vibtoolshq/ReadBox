@@ -33,7 +33,9 @@ def cmd(*args):
 
 def key_material(priv):
     info = cmd("pkey", "-in", priv, "-text", "-noout")
-    bits = re.search(rb"Private-Key: \((\d+) bit\)", info)
+    # OpenSSL 1.x: (2048 bit); OpenSSL 3.x: (2048 bit, 2 primes).
+    # Match a complete size header; keep the minimum 2048-bit check below.
+    bits = re.search(rb"(?m)^Private-Key: \((\d+) bit(?:, [2-9][0-9]* primes)?\)\r?$", info)
     if not bits or int(bits.group(1)) < 2048: raise Refused("INVALID_PRIVATE_KEY")
     return base64.b64encode(cmd("rsa", "-in", priv, "-RSAPublicKey_out",
                                 "-outform", "DER")).decode("ascii")
