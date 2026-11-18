@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { buildExpectedDnsRecords, buildCloudflareZoneFile } from "../../src/core/dns/records.ts";
+import { buildExpectedDnsRecords, buildCloudflareZoneFile } from "../../src/core/dns/records";
 import test from "node:test";
 import {
   DkimProvisionError,
   publishDkimCloudflare,
   validateDkimRsaRecord,
-} from "../../src/core/dns/dkim-provision.ts";
+} from "../../src/core/dns/dkim-provision";
 
 const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const key = publicKey.export({ type: "pkcs1", format: "der" }).toString("base64");
