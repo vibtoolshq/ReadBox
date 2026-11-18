@@ -244,7 +244,9 @@ export function DomainForm({
       if (!onCreate) return;
       setPending(true);
       try {
-        const result = await onCreate({ name, dnsConfirmed, autoDkim });
+        const result = await onCreate(autoDkim
+          ? { name, dnsConfirmed, autoDkim: true }
+          : { name, dnsConfirmed });
         if (!result.ok) {
           setFormError(result.error);
           if (result.fieldErrors) setFieldErrors(result.fieldErrors);
