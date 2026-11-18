@@ -1,0 +1,87 @@
+name: ReadBox DKIM03 escrow and recovery - disposable only
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - deployment/dkim/agent.py
+      - deployment/dkim/test_agent.py
+      - deployment/dkim/escrow.py
+      - deployment/dkim/test_escrow.py
+      - scripts/testing/dkim03-escrow-rehearsal.sh
+      - .github/workflows/dkim03-ci.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: readbox-dkim03-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  disposable:
+    if: github.repository == 'JILLU-Games/ReadBox'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      READBOX_DKIM03_DISPOSABLE: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Exact DKIM-03 source Scope Lock and no production credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .env
+          python3 - <<'PY'
+          import subprocess
+          base = "d2faedcebd302f488c515daba57441f59ff3a687"
+          allow = {
+              "deployment/dkim/agent.py", "deployment/dkim/escrow.py",
+              "deployment/dkim/test_agent.py", "deployment/dkim/test_escrow.py",
+              "scripts/testing/dkim03-escrow-rehearsal.sh",
+              ".github/workflows/dkim03-ci.yml", "docs/DKIM-ESCROW.md",
+              *("notes/%03d-%s.md" % (i, name) for i, name in [
+                  (3, "PHASE-PROGRESS-AND-CHANGE-LOG"),
+                  (4, "ERROR-HANDLING-INVENTORY"),
+                  (5, "ACTUAL-IMPLEMENTATION-TRACKER"),
+                  (6, "VERIFICATION-AND-RELEASE-GATES"),
+                  (7, "VPS-MAILSERVER-CONTRACTS"),
+              ]),
+          }
+          subprocess.run(["git", "merge-base", "--is-ancestor", base, "HEAD"], check=True)
+          paths = set(subprocess.check_output(
+              ["git", "diff", "--name-only", base, "HEAD"], text=True).splitlines())
+          assert paths <= allow and {
+              "deployment/dkim/agent.py", "deployment/dkim/escrow.py",
+              "deployment/dkim/test_agent.py", "deployment/dkim/test_escrow.py",
+              "scripts/testing/dkim03-escrow-rehearsal.sh",
+              ".github/workflows/dkim03-ci.yml", "docs/DKIM-ESCROW.md"
+          } <= paths, ("DKIM03_SCOPE_FAIL", sorted(paths ^ allow))
+          subprocess.run(["git", "diff", "--check", base, "HEAD"], check=True)
+          print("DKIM03_EXACT_SCOPE_PASS", len(paths))
+          PY
+      - name: Install age into disposable runner only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq age
+          command -v docker
+          command -v age
+      - name: Single focused real age and mocked R2 recovery + Docker agent test
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/testing/dkim03-escrow-rehearsal.sh
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            READBOX_DKIM03_DISPOSABLE=1 \
+            bash scripts/testing/dkim03-escrow-rehearsal.sh
+      - name: Production remains NO-GO
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e /etc/readbox-backup-restore.allow
+          echo DKIM03_SOURCE_ONLY_NO_VPS_R2_LIVE_KEYS_DNS_OR_RELEASE

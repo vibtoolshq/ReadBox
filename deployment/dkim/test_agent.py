@@ -1,5 +1,5 @@
 """Disposable DKIM agent tests. Run only inside an ephemeral CI container build."""
-import importlib.util, os, pathlib, stat, tempfile, unittest
+import base64, hashlib, importlib.util, json, os, pathlib, stat, tempfile, unittest
 from unittest import mock
 
 spec = importlib.util.spec_from_file_location("dkim_agent", "/usr/local/bin/dkim-agent.py")
@@ -16,9 +16,31 @@ class KeyTests(unittest.TestCase):
         agent.PUB.mkdir(mode=0o700)
         agent.IPC.mkdir(mode=0o700)
 
+    def stage(self, domain="example.test"):
+        with self.assertRaisesRegex(agent.Refused, "ESCROW_REQUIRED"):
+            agent.provision(domain)
+        key = agent.PRIV / domain / "mail.private"
+        self.assertTrue(key.is_file())
+        self.assertFalse((agent.PUB / domain / "mail.txt").exists())
+        return key
+
+    def receipt(self, key, domain="example.test"):
+        public = base64.b64decode(agent.key_material(key), validate=True)
+        digest = hashlib.sha256(key.read_bytes()).hexdigest()
+        record = {"version": 1, "domain": domain, "privateSha256": digest,
+                  "publicSha256": hashlib.sha256(public).hexdigest(),
+                  "ciphertextSha256": "a" * 64,
+                  "objectKey": "readbox/dkim-escrow/v1/" + domain + "/" + digest + ".age",
+                  "bucket": "disposable-fixture", "verified": True}
+        receipt = key.parent / "escrow.json"
+        receipt.write_text(json.dumps(record), encoding="ascii")
+        receipt.chmod(0o644)
+        return receipt
+
     def test_key_generation_is_idempotent_and_private_not_public(self):
+        private = self.stage()
+        self.receipt(private)
         self.assertEqual(agent.provision("example.test")["state"], "created")
-        private = agent.PRIV / "example.test" / "mail.private"
         public = agent.PUB / "example.test" / "mail.txt"
         before = private.read_bytes()
         self.assertIn(b"PRIVATE KEY", before)
@@ -37,6 +59,8 @@ class KeyTests(unittest.TestCase):
         self.assertEqual(f.read_text(), '"v=DKIM1; k=rsa; p=LEGACY"')
 
     def test_conflicting_public_never_replaced(self):
+        key = self.stage()
+        self.receipt(key)
         agent.provision("example.test")
         path = agent.PUB / "example.test" / "mail.txt"
         path.write_text('"v=DKIM1; k=rsa; p=DIFFERENT"')
@@ -61,6 +85,27 @@ class KeyTests(unittest.TestCase):
                     with self.assertRaisesRegex(agent.Refused, "INVALID_PRIVATE_KEY"):
                         agent.key_material(pathlib.Path("/disposable/mock-private.pem"))
                     self.assertEqual(runner.call_count, 1)
+
+    def test_missing_or_tampered_escrow_blocks_public_key(self):
+        key = self.stage()
+        self.assertFalse((agent.PUB / "example.test" / "mail.txt").exists())
+        receipt = self.receipt(key)
+        data = json.loads(receipt.read_text())
+        data["privateSha256"] = "b" * 64
+        receipt.write_text(json.dumps(data), encoding="ascii")
+        with self.assertRaisesRegex(agent.Refused, "ESCROW_RECEIPT_INVALID"):
+            agent.provision("example.test")
+        self.assertFalse((agent.PUB / "example.test" / "mail.txt").exists())
+        receipt.unlink()
+        with self.assertRaisesRegex(agent.Refused, "ESCROW_REQUIRED"):
+            agent.provision("example.test")
+
+    def test_escrow_receipt_wrong_permissions_fail_closed(self):
+        key = self.stage()
+        receipt = self.receipt(key)
+        receipt.chmod(0o666)
+        with self.assertRaisesRegex(agent.Refused, "ESCROW_RECEIPT_INVALID"):
+            agent.provision("example.test")
 
     def test_symlinks_and_traversal_rejected(self):
         with self.assertRaisesRegex(agent.Refused, "INVALID_DOMAIN"):

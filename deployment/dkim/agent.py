@@ -57,6 +57,41 @@ def exclusive_write(path, data, mode):
         os.link(tmp, path, follow_symlinks=False)  # never replaces an existing key
     finally: tmp.unlink(missing_ok=True)
 
+def require_verified_escrow(domain, private_path, public_der):
+    """An exact, root-published escrow receipt is required before any TXT exists.
+
+    This agent has no network access, so only the separate root-only host
+    escrow helper can independently verify offsite ciphertext and write the
+    receipt. This is an operational gate, not live R2 verification.
+    """
+    path = private_path.parent / "escrow.json"
+    if not regular(path):
+        raise Refused("ESCROW_REQUIRED")
+    st = path.stat()
+    if st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o644 or st.st_nlink != 1:
+        raise Refused("ESCROW_RECEIPT_INVALID")
+    try:
+        if st.st_size > 2048:
+            raise ValueError("oversize")
+        record = json.loads(path.read_bytes())
+        keyhash = hashlib.sha256(private_path.read_bytes()).hexdigest()
+        pubhash = hashlib.sha256(base64.b64decode(public_der, validate=True)).hexdigest()
+        required = {"version", "domain", "privateSha256", "publicSha256",
+                    "ciphertextSha256", "objectKey", "bucket", "verified"}
+        if (not isinstance(record, dict) or set(record) != required or
+                record["version"] != 1 or record["verified"] is not True or
+                record["domain"] != domain or record["privateSha256"] != keyhash or
+                record["publicSha256"] != pubhash or
+                not re.fullmatch(r"[a-f0-9]{64}", record["ciphertextSha256"]) or
+                record["objectKey"] !=
+                    "readbox/dkim-escrow/v1/" + domain + "/" + keyhash + ".age" or
+                not isinstance(record["bucket"], str) or
+                not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,62}", record["bucket"])):
+            raise ValueError("receipt")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        raise Refused("ESCROW_RECEIPT_INVALID") from None
+
+
 def provision(domain):
     if not isinstance(domain, str) or not DOMAIN.fullmatch(domain):
         raise Refused("INVALID_DOMAIN")
@@ -78,8 +113,13 @@ def provision(domain):
                 exclusive_write(keyfile, tmpkey.read_bytes(), 0o600)
             finally: tmpkey.unlink(missing_ok=True)
         key = key_material(keyfile)
+        if has_pub and current_public(txtfile) != key:
+            raise Refused("PUBLIC_KEY_CONFLICT")
+        # Private material may exist before escrow, but public TXT must not.
+        # After a root operator completes offsite verification, retry the
+        # existing admin action to publish the matching public key.
+        require_verified_escrow(domain, keyfile, key)
         if has_pub:
-            if current_public(txtfile) != key: raise Refused("PUBLIC_KEY_CONFLICT")
             return {"state": "existing", "public_ready": True}
         parts = ["v=DKIM1; k=rsa; ", "p=" + key[:180]] + [
             key[i:i+180] for i in range(180, len(key), 180)]
