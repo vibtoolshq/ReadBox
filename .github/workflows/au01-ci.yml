@@ -1,0 +1,160 @@
+name: ReadBox AU01 Docker host bridge scoped CI - NO deployment
+on:
+  push:
+    branches: [maintenance/readbox-au01-20261118]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: readbox-au01-disposable
+  cancel-in-progress: false
+
+jobs:
+  au01-scoped:
+    if: github.repository == 'JILLU-Games/ReadBox'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GIT_TERMINAL_PROMPT: "0"
+      READBOX_AU01_DISPOSABLE: "1"
+    steps:
+      - name: Checkout exact source without write credentials
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: AU01 exact approved scope and patch safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          base="f641339021029b09f1a785aa81f27908fe9b5911"
+          paths={
+            "src/core/updates/service.ts",
+            "src/components/vcon/system-update-console.tsx",
+            "src/app/(workspace)/vcon/system-update/page.tsx",
+            "src/app/api/vcon/update/check/route.ts",
+            "src/app/api/vcon/update/preflight/route.ts",
+            "src/app/api/vcon/update/start/route.ts",
+            "src/app/api/vcon/update/status/route.ts",
+            "docker-compose.yml",
+            "scripts/install/readbox-update.sh",
+            "scripts/install/readbox-updater-host-install.sh",
+            "scripts/updater/compose_host_worker.py",
+            "deployment/updater/systemd/readbox-updater-bridge.service",
+            "tests/admin/phase6-settings-update-health.test.ts",
+            "tests/integration/admin-system-update.test.mjs",
+            "scripts/testing/au01-host-rehearsal.sh",
+            ".github/workflows/au01-ci.yml",
+            "docs/ADMIN-SYSTEM-UPDATE.md",
+          }
+          notes={f"notes/backup-restore/00{i}-{suffix}.md" for i,suffix in [
+            (3,"PHASE-PROGRESS-AND-CHANGE-LOG"),(4,"ERROR-HANDLING-INVENTORY"),
+            (5,"ACTUAL-WORKING-FEATURE-TRACKER"),(6,"RESTORE-R2-SECURITY-AND-DATA-CONTRACT"),
+            (7,"VERIFICATION-AND-PRODUCTION-GATES")]}
+          subprocess.run(["git","merge-base","--is-ancestor",base,"HEAD"],check=True)
+          changed=set(subprocess.check_output(
+              ["git","diff","--name-only",base,"HEAD"],text=True).splitlines())
+          assert changed <= (paths | notes), ("AU01_SCOPE_ESCAPE",sorted(changed-paths-notes))
+          assert {"scripts/updater/compose_host_worker.py",
+                  "scripts/install/readbox-updater-host-install.sh",
+                  "src/core/updates/service.ts",
+                  "docker-compose.yml"} <= changed, ("AU01_MISSING_SCOPE",sorted(changed))
+          subprocess.run(["git","diff","--check",base,"HEAD"],check=True)
+          print("AU01_EXACT_SCOPE_PASS",len(changed))
+          PY
+          if grep -nE 'docker[.]sock|privileged: true' docker-compose.yml; then
+            echo "AU01_DOCKER_SOCKET_OR_PRIVILEGED_CONTAINER_REFUSED"; exit 1
+          fi
+          echo AU01_UNPRIVILEGED_WEB_BOUNDARY_PASS
+
+      - name: Locked dependencies and compile/type gate
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Verify server, admin and UI contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npx prisma validate
+          npm run typecheck
+          node --conditions=react-server --import tsx --test \
+            tests/integration/admin-system-update.test.mjs \
+            tests/admin/phase6-settings-update-health.test.ts
+          echo AU01_TYPES_AND_ADMIN_REGRESSION_PASS
+
+      - name: Disposable authenticated Unix RPC and host fail-closed negatives
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/testing/au01-host-rehearsal.sh
+
+      - name: Real disposable root systemd bridge + unprivileged container HMAC IPC
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$GITHUB_REPOSITORY" = JILLU-Games/ReadBox
+          sudo test ! -e /opt/readbox
+          sudo test ! -e /etc/systemd/system/readbox-updater-bridge.service
+          sudo git clone --quiet "$GITHUB_WORKSPACE" /opt/readbox
+          sudo git -C /opt/readbox switch -q -c main
+          sudo git -C /opt/readbox remote set-url origin https://github.com/vibtoolshq/ReadBox.git
+          sudo sh -c 'printf "POSTGRES_USER=readbox\nPOSTGRES_DB=readbox\nSERVICE_PASSWORD_DB=disposable-secret-not-real-12345678901234567890\nSERVICE_BASE64_64_SECRET=disposable-secret-not-real-12345678901234567890\nPOSTFIX_LOOKUP_PASSWORD=disposable-secret-not-real-12345678901234567890\n" > /opt/readbox/.env; chmod 600 /opt/readbox/.env'
+          docker volume inspect readbox_readbox_update_ipc >/dev/null 2>&1 && exit 70 || true
+          docker volume create --label readbox.au01.disposable=true readbox_readbox_update_ipc >/dev/null
+          sudo bash /opt/readbox/scripts/install/readbox-updater-host-install.sh
+          sudo systemctl is-active --quiet readbox-updater-bridge.service
+          node_image=node:22-alpine
+          docker run --rm --network none --user 1001:1001 \
+            --mount type=volume,source=readbox_readbox_update_ipc,target=/run/readbox-updater,readonly \
+            "$node_image" node -e '
+              const fs=require("fs"),h=require("node:http"),c=require("node:crypto");
+              const token=fs.readFileSync("/run/readbox-updater/access.token","utf8").trim();
+              const body=JSON.stringify({action:"status"}), stamp=String(Math.floor(Date.now()/1000)),nonce=c.randomBytes(16).toString("hex");
+              const hash=c.createHash("sha256").update(body).digest("hex");
+              const sig=c.createHmac("sha256",token).update(stamp+"."+nonce+"."+hash).digest("hex");
+              const req=h.request({socketPath:"/run/readbox-updater/agent.sock",method:"POST",path:"/rpc",timeout:3000,
+                headers:{"Content-Length":Buffer.byteLength(body),"X-ReadBox-Timestamp":stamp,"X-ReadBox-Nonce":nonce,"X-ReadBox-Signature":sig}},res=>{
+                let data="";res.on("data",d=>data+=d);res.on("end",()=>{
+                  if(res.statusCode!==200||JSON.parse(data).status.step!=="idle") process.exitCode=1;
+                  else console.log("AU01_REAL_UNPRIVILEGED_AUTHENTICATED_IPC_PASS");
+                });
+              });req.on("error",e=>{console.error(e.message);process.exitCode=1;});req.end(body);
+            '
+          echo AU01_REAL_DISPOSABLE_SYSTEMD_BRIDGE_PASS
+
+      - name: No-secret Compose and updater packaging smoke
+        shell: bash
+        env:
+          SERVICE_PASSWORD_DB: disposable-value-not-real-12345678901234567890
+          SERVICE_BASE64_64_SECRET: disposable-value-not-real-12345678901234567890
+          POSTFIX_LOOKUP_PASSWORD: disposable-value-not-real-12345678901234567890
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml --project-name readbox config --quiet
+          test -f deployment/updater/systemd/readbox-updater-bridge.service
+          grep -q 'NoNewPrivileges=true' deployment/updater/systemd/readbox-updater-bridge.service
+          grep -q 'READBOX_UPDATE_TARGET_SHA' scripts/install/readbox-update.sh
+          grep -q 'readbox_update_ipc:/run/readbox-updater:ro' docker-compose.yml
+          echo AU01_DOCKER_COMPOSE_SECURITY_CONTRACT_PASS
+
+      - name: Existing R05 disposable encrypted recovery regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y age acl
+          bash deployment/operations/tests/r05-rehearsal.sh
+          echo AU01_ORIGINAL_R05_RECOVERY_PASS
+
+      - name: Production remains NO-GO
+        run: |
+          set -euo pipefail
+          node scripts/testing/r06-release-gate.mjs --ci | tee /tmp/au01-r06-gate.txt
+          grep -Fq R06_PRODUCTION_NO_GO /tmp/au01-r06-gate.txt
+          echo AU01_CI_SUCCESS_NO_VPS_NO_R2_NO_RELEASE

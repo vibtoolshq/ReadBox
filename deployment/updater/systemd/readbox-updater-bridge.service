@@ -1,0 +1,29 @@
+[Unit]
+Description=ReadBox AU-01 restricted Docker Compose update bridge
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/readbox
+EnvironmentFile=/etc/readbox-updater-bridge.env
+ExecStart=/usr/bin/python3 /opt/readbox/scripts/updater/compose_host_worker.py --socket-dir ${READBOX_UPDATE_SOCKET_DIR}
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

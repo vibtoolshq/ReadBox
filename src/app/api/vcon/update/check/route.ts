@@ -30,6 +30,9 @@ export async function GET() {
     {
       ok: true,
       latest_version: result.latest_version,
+      mode: result.mode,
+      target_sha: result.target_sha,
+      current_sha: result.current_sha,
       release_notes: result.release_notes,
       archive_url: result.archive_url,
       checksum_url: result.checksum_url,

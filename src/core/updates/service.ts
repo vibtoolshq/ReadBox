@@ -4,7 +4,8 @@ import type { AuditWriteClient } from "@/core/audit/types";
 import { getPrismaClient } from "@/core/database/client";
 import { logger } from "@/core/server/logger";
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
+import { request as unixRequest } from "node:http";
 import { constants as fsConstants, existsSync, statSync } from "node:fs";
 import {
   access,
@@ -16,6 +17,67 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
+
+// AU-01: web runs unprivileged. Only a root host bridge receives fixed HMAC
+// RPCs through a read-only mounted Unix socket; never mount docker.sock.
+const HOST_SOCKET = "/run/readbox-updater/agent.sock";
+const HOST_SECRET = "/run/readbox-updater/access.token";
+const MAX_HOST_BYTES = 64 * 1024;
+const SHA40 = /^[0-9a-f]{40}$/;
+
+interface HostBridgeReply {
+  readonly status?: "ready" | "blocked" | "queued" | UpdateStatusPayload;
+  readonly current_sha?: string;
+  readonly checks?: readonly PreflightCheckItem[];
+  readonly error?: string;
+}
+
+async function callHostUpdater(
+  action: "status" | "preflight" | "start",
+  payload: Record<string, unknown> = {},
+): Promise<HostBridgeReply> {
+  const secret = (await readFile(HOST_SECRET, "utf8")).trim();
+  if (!/^[a-f0-9]{64}$/.test(secret)) throw new Error("HOST_BRIDGE_TOKEN_INVALID");
+  const body = JSON.stringify({ action, ...payload });
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const nonce = randomBytes(16).toString("hex");
+  const digest = createHash("sha256").update(body).digest("hex");
+  const signature = createHmac("sha256", secret)
+    .update([timestamp, nonce, digest].join(".")).digest("hex");
+  return new Promise<HostBridgeReply>((resolve, reject) => {
+    const req = unixRequest({
+      socketPath: HOST_SOCKET, path: "/rpc", method: "POST", timeout: 5_000,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+        "X-ReadBox-Timestamp": timestamp,
+        "X-ReadBox-Nonce": nonce,
+        "X-ReadBox-Signature": signature,
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      res.on("data", (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (bytes > MAX_HOST_BYTES) req.destroy(new Error("HOST_RESPONSE_TOO_LARGE"));
+        else chunks.push(chunk);
+      });
+      res.on("end", () => {
+        try {
+          const reply = JSON.parse(Buffer.concat(chunks).toString("utf8")) as HostBridgeReply;
+          if ((res.statusCode ?? 500) >= 400) {
+            reject(new Error(typeof reply.error === "string" ? reply.error : "HOST_BRIDGE_REFUSED"));
+          } else {
+            resolve(reply);
+          }
+        } catch { reject(new Error("HOST_BRIDGE_BAD_RESPONSE")); }
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error("HOST_BRIDGE_TIMEOUT")));
+    req.on("error", reject);
+    req.end(body);
+  });
+}
 
 export const MIN_RUNTIME_FREE_BYTES = 100 * 1024 * 1024;
 
@@ -35,12 +97,16 @@ export interface UpdatePreflightResult {
   readonly status: "ready" | "blocked";
   readonly checks: readonly PreflightCheckItem[];
   readonly message: string;
+  readonly currentSha?: string;
 }
 
 export type ReleaseCheckResult =
   | {
       readonly ok: true;
       readonly latest_version: string;
+      readonly mode?: "stable" | "source";
+      readonly target_sha?: string;
+      readonly current_sha?: string;
       readonly release_notes: string;
       readonly archive_url: string;
       readonly checksum_url: string;
@@ -194,9 +260,68 @@ export function isOfficialReleaseUrl(
   return true;
 }
 
+// Docker channel: a source SHA is not a stable release. The source and mirror
+// must independently advertise the identical immutable main head.
+async function checkVerifiedMainSource(
+  fetchFn: typeof fetch,
+): Promise<ReleaseCheckResult> {
+  const mainRef = (repo: string) =>
+    "https://api.github.com/repos/" + repo + "/git/ref/heads/main";
+  const headers = { Accept: "application/vnd.github+json", "User-Agent": "ReadBox-Updater" };
+  try {
+    const [sourceRes, mirrorRes] = await Promise.all([
+      fetchFn(mainRef("vibtoolshq/ReadBox"), { headers, signal: AbortSignal.timeout(10_000), cache: "no-store" }),
+      fetchFn(mainRef("JILLU-Games/ReadBox"), { headers, signal: AbortSignal.timeout(10_000), cache: "no-store" }),
+    ]);
+    if (!sourceRes.ok || !mirrorRes.ok) throw new Error("REMOTE_UNAVAILABLE");
+    const source = (await sourceRes.json()) as { object?: { sha?: unknown } };
+    const mirror = (await mirrorRes.json()) as { object?: { sha?: unknown } };
+    const sha = source.object?.sha;
+    if (typeof sha !== "string" || !SHA40.test(sha) || sha !== mirror.object?.sha) {
+      return { ok: false, code: "NO_COMPATIBLE_RELEASE", status: 409,
+        error: "Source/mirror main SHA mismatch; automatic updates are refused." };
+    }
+    let stableDetail = "No approved stable release artifact is assumed.";
+    try {
+      const stable = await fetchFn("https://api.github.com/repos/vibtoolshq/ReadBox/releases/latest", {
+        headers, signal: AbortSignal.timeout(5_000), cache: "no-store",
+      });
+      if (stable.ok) {
+        const item = (await stable.json()) as { tag_name?: unknown; draft?: unknown; prerelease?: unknown };
+        if (typeof item.tag_name === "string" && !item.draft && !item.prerelease) {
+          stableDetail = "Stable release detected: " + item.tag_name + ". Docker updates use pinned verified main, not legacy ZIP.";
+        }
+      }
+    } catch {
+      // Stable metadata is informational and must never override exact main parity.
+    }
+    let currentSha: string | undefined;
+    try {
+      const host = await callHostUpdater("preflight");
+      currentSha = typeof host.current_sha === "string" && SHA40.test(host.current_sha)
+        ? host.current_sha : undefined;
+    } catch {
+      // Missing bridge is surfaced separately by preflight. No install without it.
+    }
+    return {
+      ok: true, latest_version: sha.slice(0, 12), mode: "source",
+      target_sha: sha, current_sha: currentSha,
+      release_notes: "Verified source and mirror main: " + sha +
+        ". This is a verified source channel, NOT a stable release. " + stableDetail,
+      archive_url: "", checksum_url: "", published_at: "",
+    };
+  } catch {
+    return { ok: false, code: "UPSTREAM_UNAVAILABLE", status: 503,
+      error: "Cannot verify both official GitHub main refs." };
+  }
+}
+
 export async function checkLatestRelease(
   options?: UpdateRuntimeOptions,
 ): Promise<ReleaseCheckResult> {
+  if (options?.containerRuntime ?? isContainerRuntime()) {
+    return checkVerifiedMainSource(options?.fetchImpl ?? fetch);
+  }
   const githubRepo = options?.githubRepo ??
     (env.nodeEnv === "production"
       ? canonicalUpdateRepository(env.updateGithubRepo)
@@ -444,6 +569,37 @@ export async function runUpdatePreflight(
       : !updaterUnitExists && isContainerRuntime();
 
   if (containerMode) {
+    try {
+      const bridge = await callHostUpdater("preflight");
+      const hostStatus = await callHostUpdater("status");
+      if ((bridge.status !== "ready" && bridge.status !== "blocked") ||
+          !Array.isArray(bridge.checks) || !bridge.checks.length ||
+          typeof bridge.current_sha !== "string" || !SHA40.test(bridge.current_sha)) {
+        throw new Error("INVALID_HOST_PREFLIGHT");
+      }
+      const stage = typeof hostStatus.status === "object" && hostStatus.status !== null
+        ? hostStatus.status.step : "error";
+      const busyOrReview = ["error", "queued", "verify", "update"].includes(stage ?? "error");
+      const hostChecks: PreflightCheckItem[] = [
+        { name: "deployment runtime", passed: true, detail: "Docker Compose host bridge" },
+        { name: "authenticated root host bridge", passed: true,
+          detail: "Restricted Unix RPC; no Docker socket in web" },
+        ...bridge.checks,
+        { name: "host update state", passed: !busyOrReview,
+          detail: busyOrReview ? "Update active or operator review required" : "No active update" },
+      ];
+      const ready = bridge.status === "ready" && !busyOrReview &&
+        hostChecks.every((item) => item.passed);
+      return {
+        status: ready ? "ready" : "blocked",
+        checks: hostChecks, currentSha: bridge.current_sha,
+        message: ready ? "Docker Compose host updater is ready." :
+          "Host preflight blocked or operator review required.",
+      };
+    } catch {
+      // Absent host integration must remain FAIL-CLOSED. Existing Docker-only
+      // preflight evidence below is historical, not permission to update.
+    }
     check(
       "deployment runtime",
       true,
@@ -639,6 +795,21 @@ export async function runUpdatePreflight(
 export async function readUpdateStatus(
   options?: UpdateRuntimeOptions,
 ): Promise<UpdateStatusPayload> {
+  if (options?.containerRuntime ?? isContainerRuntime()) {
+    try {
+      const reply = await callHostUpdater("status");
+      const value = reply.status;
+      if (typeof value === "object" && value !== null &&
+          typeof value.step === "string" &&
+          typeof value.message === "string" &&
+          typeof value.progress === "number" && Number.isFinite(value.progress)) {
+        return { step: value.step, message: value.message, progress: value.progress };
+      }
+    } catch {
+      // An uninstalled host bridge is a capability block, not an active job.
+    }
+    return { step: "idle", message: "Docker host updater not installed", progress: 0 };
+  }
   const runtimeDir = options?.runtimeDir ?? env.updateRuntimeDir;
   const statusPath = join(runtimeDir, "update_status.json");
 
@@ -682,9 +853,54 @@ export async function queueUpdateRequest(
   input: {
     readonly archiveUrl?: unknown;
     readonly checksumUrl?: unknown;
+    readonly targetSha?: unknown;
   },
   options?: UpdateRuntimeOptions,
 ): Promise<QueueUpdateResult> {
+  // Docker update requests contain an immutable SHA only. Legacy ZIP URLs are
+  // deliberately excluded from privileged Docker host execution.
+  if (options?.containerRuntime ?? isContainerRuntime()) {
+    if (typeof input.targetSha !== "string" || !SHA40.test(input.targetSha) ||
+        input.archiveUrl || input.checksumUrl) {
+      return { ok: false, status: 400, code: "INVALID_URL",
+        error: "Docker host updates require an exact verified source SHA." };
+    }
+    const pf = await runUpdatePreflight(options);
+    if (pf.status !== "ready") {
+      return { ok: false, status: 503, code: "PREFLIGHT_BLOCKED",
+        error: "Docker host updater preflight is blocked.", preflight: pf };
+    }
+    try {
+      const reply = await callHostUpdater("start",
+        { target_sha: input.targetSha, confirm: true });
+      if (reply.status !== "queued") throw new Error("HOST_REFUSED");
+      const client = options?.prisma !== undefined
+        ? options.prisma
+        : env.databaseUrl ? (getPrismaClient() as unknown as AuditWriteClient) : null;
+      if (client) {
+        try {
+          await recordAudit(client, {
+            actorId: options?.actorId ?? null,
+            authSource: options?.authSource,
+            actorUsername: options?.actorUsername,
+            action: "system_update_requested",
+            targetType: "system_update",
+            targetIdentifier: input.targetSha,
+            headers: options?.headers,
+            details: { target_sha: input.targetSha, mode: "verified_source_main" },
+          });
+        } catch {
+          logger.error("host_update_audit_write_failed");
+        }
+      }
+      return { ok: true, status: 200, payload: { status: "started" } };
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      return { ok: false, status: code === "UPDATE_ALREADY_RUNNING" ? 409 : 503,
+        code: code === "UPDATE_ALREADY_RUNNING" ? "ALREADY_IN_PROGRESS" : "PREFLIGHT_BLOCKED",
+        error: "Host updater refused or is unavailable; no retry without checking status." };
+    }
+  }
   const githubRepo = options?.githubRepo ??
     (env.nodeEnv === "production"
       ? canonicalUpdateRepository(env.updateGithubRepo)

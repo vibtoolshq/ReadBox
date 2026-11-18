@@ -68,6 +68,11 @@ export function SystemUpdateConsole({
     useState<UpdatePreflightResult>(initialPreflight);
   const [status, setStatus] = useState<UpdateStatusPayload>(initialStatus);
   const [latestVersion, setLatestVersion] = useState<string>("Unknown");
+  const [releaseMode, setReleaseMode] = useState<"stable" | "source">("stable");
+  const [sourceSha, setSourceSha] = useState<string>("");
+  const [currentSha, setCurrentSha] = useState(initialPreflight.currentSha ?? "");
+  const isDockerMode = initialPreflight.checks.some((item) =>
+    item.name === "deployment runtime" && /Docker|Container/.test(item.detail));
   const [releaseNotes, setReleaseNotes] = useState<string>(
     "Click 'Check for Updates' to fetch release metadata.",
   );
@@ -126,6 +131,7 @@ export function SystemUpdateConsole({
       }
       const data = (await res.json()) as UpdatePreflightResult;
       setPreflight(data);
+      if (data.currentSha) setCurrentSha(data.currentSha);
       return data;
     } catch {
       const fallback: UpdatePreflightResult = {
@@ -154,6 +160,9 @@ export function SystemUpdateConsole({
         const data = (await res.json()) as {
           ok?: boolean;
           latest_version?: string;
+          mode?: "source" | "stable";
+          target_sha?: string;
+          current_sha?: string;
           release_notes?: string;
           archive_url?: string;
           checksum_url?: string;
@@ -166,6 +175,9 @@ export function SystemUpdateConsole({
         }
 
         setLatestVersion(data.latest_version);
+        setReleaseMode(data.mode === "source" ? "source" : "stable");
+        setSourceSha(data.mode === "source" ? data.target_sha || "" : "");
+        if (data.current_sha) setCurrentSha(data.current_sha);
         setReleaseNotes(data.release_notes || "No release notes provided.");
         setArchiveUrl(data.archive_url || "");
         setChecksumUrl(data.checksum_url || "");
@@ -176,26 +188,25 @@ export function SystemUpdateConsole({
 
         await refreshPreflight();
 
-        if (
-          data.latest_version !== currentVersion &&
-          data.archive_url &&
-          data.checksum_url
-        ) {
+        const available = data.mode === "source"
+          ? Boolean(data.target_sha && data.target_sha !== (data.current_sha || currentSha))
+          : data.latest_version !== currentVersion &&
+            Boolean(data.archive_url && data.checksum_url);
+        const upToDate = data.mode === "source"
+          ? Boolean(data.target_sha && data.target_sha === (data.current_sha || currentSha))
+          : Boolean(data.archive_url && data.checksum_url);
+        if (available) {
           setAvailabilityLabel("Update available");
           if (showModalFeedback) {
             setDoubleConfirmChecked(false);
             setShowConfirmModal(true);
           }
-        } else if (data.archive_url && data.checksum_url) {
+        } else if (upToDate) {
           setAvailabilityLabel("Up to date");
-          if (showModalFeedback) {
-            setShowUpToDateModal(true);
-          }
+          if (showModalFeedback) setShowUpToDateModal(true);
         } else {
-          setAvailabilityLabel("Artifact missing");
-          setErrorMessage(
-            "Update artifacts not found for the latest release.",
-          );
+          setAvailabilityLabel("Source metadata unavailable");
+          setErrorMessage("Pinned update target could not be verified.");
         }
       } catch (err) {
         const msg =
@@ -210,7 +221,7 @@ export function SystemUpdateConsole({
         setIsCheckingRelease(false);
       }
     },
-    [currentVersion, refreshPreflight],
+    [currentVersion, currentSha, refreshPreflight],
   );
 
   useEffect(() => {
@@ -237,7 +248,7 @@ export function SystemUpdateConsole({
           setIsPolling(false);
           appendLog(
             "success",
-            "Update complete. Application services restarted cleanly.",
+            "Update complete; host reported successful Docker health checks.",
           );
           notify.success("System update completed.");
         } else if (data.step === "error" || data.progress === -1) {
@@ -277,8 +288,9 @@ export function SystemUpdateConsole({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          archive_url: archiveUrl,
-          checksum_url: checksumUrl,
+          ...(releaseMode === "source"
+            ? { target_sha: sourceSha }
+            : { archive_url: archiveUrl, checksum_url: checksumUrl }),
         }),
       });
       const data = (await res.json()) as {
@@ -300,7 +312,9 @@ export function SystemUpdateConsole({
       setShowLogModal(true);
       appendLog(
         "info",
-        "Update request queued for root updater worker (mode 0640).",
+        releaseMode === "source"
+          ? "Pinned update queued through authenticated host bridge."
+          : "Update request queued for root updater worker (mode 0640).",
       );
       setStatus({
         step: "queued",
@@ -319,10 +333,11 @@ export function SystemUpdateConsole({
     }
   }
 
-  const updateAvailable =
-    latestVersion !== "Unknown" &&
-    latestVersion !== currentVersion &&
-    Boolean(archiveUrl && checksumUrl);
+  const updateAvailable = releaseMode === "source"
+    ? /^[0-9a-f]{40}$/.test(sourceSha) && sourceSha !== currentSha
+    : latestVersion !== "Unknown" &&
+      latestVersion !== currentVersion &&
+      Boolean(archiveUrl && checksumUrl);
 
   const canInstallUpdate =
     updateAvailable &&
@@ -379,21 +394,21 @@ export function SystemUpdateConsole({
                   id="current-version"
                   className="mt-1 block font-mono text-sm font-medium tabular-nums text-foreground"
                 >
-                  {currentVersion}
+                  {isDockerMode && currentSha ? currentSha.slice(0, 12) : currentVersion}
                 </strong>
               </div>
 
               <div className="border border-border bg-background p-2.5">
                 <CaptionText className="block">Update Channel</CaptionText>
                 <strong className="mt-1 block text-sm font-medium text-foreground">
-                  Stable
+                  {isDockerMode ? "Verified source main" : "Stable"}
                 </strong>
               </div>
 
               <div className="border border-border bg-background p-2.5">
                 <CaptionText className="block">Update System</CaptionText>
                 <strong className="mt-1 block text-sm font-medium text-foreground">
-                  Signed / Resumable
+                  {isDockerMode ? "Pinned SHA / Guarded" : "Signed / Resumable"}
                 </strong>
               </div>
 
@@ -409,18 +424,18 @@ export function SystemUpdateConsole({
             </div>
 
             <div className="border border-border bg-background px-2.5 py-2 text-xs text-muted-foreground [overflow-wrap:anywhere]">
-              <span>Handoff Queue:</span>{" "}
+              <span>{isDockerMode ? "Host Bridge:" : "Handoff Queue:"}</span>{" "}
               <code className="font-mono text-foreground">
-                {runtimeDir}/update_request.json
+                {isDockerMode ? "/run/readbox-updater/agent.sock" : `${runtimeDir}/update_request.json`}
               </code>{" "}
-              <span>·</span> <span>Mode 0640 hard-link</span>
+              <span>·</span> <span>{isDockerMode ? "HMAC-authenticated host bridge" : "Mode 0640 hard-link"}</span>
             </div>
           </PanelBody>
         </Panel>
 
         <Panel className="min-w-0">
           <PanelHeader>
-            <SectionTitle>Latest Release</SectionTitle>
+            <SectionTitle>{isDockerMode ? "Verified Source Update" : "Latest Release"}</SectionTitle>
             <Badge
               id="update-availability-badge"
               variant={
@@ -618,16 +633,16 @@ export function SystemUpdateConsole({
             Confirm System Update
           </DialogTitle>
           <DialogDescription>
-            Version{" "}
+            {releaseMode === "source" ? "Pinned source SHA " : "Version "}
             <strong
               id="modal-latest-version"
               className="font-mono text-foreground"
             >
               {latestVersion}
             </strong>{" "}
-            is available. The privileged root updater worker will verify the
-            SHA-256 checksum, create a full pre-upgrade backup, and restart
-            web/ingestion workers while keeping Postfix and Dovecot active.
+            is available. {releaseMode === "source"
+              ? "The restricted host bridge verifies both GitHub main refs, creates an encrypted pre-update snapshot, and runs the guarded Docker Compose updater. No unsafe automatic database rollback."
+              : "The privileged host updater verifies the release checksum and creates a pre-upgrade backup before deployment."}
           </DialogDescription>
 
           <Label className="flex cursor-pointer items-start gap-2 border border-border bg-background p-2.5 font-normal text-foreground">
@@ -638,7 +653,7 @@ export function SystemUpdateConsole({
             />
             <span>
               I confirm that preflight checks are reviewed and authorize queuing
-              the signed upgrade request.
+              the verified, pinned update request.
             </span>
           </Label>
 

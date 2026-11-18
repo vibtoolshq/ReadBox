@@ -111,6 +111,8 @@ services:
       - readbox_locks:/var/lock/readbox-provision
       - readbox_opendkim:/etc/opendkim/keys
       - readbox_backup_ipc:/run/readbox-backup-agent:ro
+      # AU-01: restricted HMAC Unix socket only; NOT the Docker socket.
+      - readbox_update_ipc:/run/readbox-updater:ro
     networks:
       - readbox_internal
     healthcheck:
@@ -274,6 +276,8 @@ volumes:
   readbox_postfix_queue:
   # BR-02: private Unix socket only; no Docker daemon mount.
   readbox_backup_ipc:
+  # AU-01 host bridge; kept separate from backup IPC and Docker daemon.
+  readbox_update_ipc:
 
 networks:
   readbox_internal:

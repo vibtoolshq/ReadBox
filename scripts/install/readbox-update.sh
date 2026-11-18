@@ -53,9 +53,26 @@ docker image inspect ubuntu:24.04 >/dev/null || {
   echo "Pre-pull and audit ubuntu:24.04 recovery sidecar before updating." >&2; exit 2
 }
 docker compose --project-name "$PROJECT" -f docker-compose.yml config --quiet
+# AU-01 bridge pins an exact verified main SHA and independent mirror parity.
+# Legacy manual invocation remains allowed without the opt-in pin.
+expected="${READBOX_UPDATE_TARGET_SHA:-}"
+if [[ -n "$expected" && ! "$expected" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "AU01_INVALID_PINNED_TARGET" >&2; exit 2
+fi
+if [[ "${READBOX_UPDATE_REQUIRE_PARITY:-0}" == 1 ]]; then
+  [[ -n "$expected" ]] || { echo "AU01_TARGET_REQUIRED" >&2; exit 2; }
+  source_sha="$(git ls-remote --exit-code https://github.com/vibtoolshq/ReadBox.git refs/heads/main | cut -f1)"
+  mirror_sha="$(git ls-remote --exit-code https://github.com/JILLU-Games/ReadBox.git refs/heads/main | cut -f1)"
+  [[ "$source_sha" == "$expected" && "$mirror_sha" == "$expected" ]] || {
+    echo "AU01_SOURCE_MIRROR_SHA_MISMATCH" >&2; exit 2
+  }
+fi
 before="$(git rev-parse HEAD)"
 git fetch --no-tags origin main
 after="$(git rev-parse FETCH_HEAD)"
+if [[ -n "$expected" && "$after" != "$expected" ]]; then
+  echo "AU01_FETCHED_SHA_MISMATCH" >&2; exit 2
+fi
 if [[ "$before" == "$after" ]]; then
   echo "QIS01_ALREADY_UP_TO_DATE"; exit 0
 fi
@@ -80,6 +97,26 @@ if ! docker compose --project-name "$PROJECT" -f docker-compose.yml up -d --buil
   echo "Database migrations may already have been applied. Do NOT run git reset or delete volumes." >&2
   echo "Follow an explicitly approved rollback/restore plan; no automatic destructive rollback." >&2
   exit 1
+fi
+# AU-01: bounded Compose health, not merely a successful build/start exit.
+# Do not restore data or reset Git on an uncertain/migration failure.
+if [[ -n "$expected" ]]; then
+  healthy=0
+  for attempt in {1..45}; do
+    all_healthy=1
+    for svc in postgres web worker; do
+      cid="$(docker compose --project-name "$PROJECT" -f docker-compose.yml ps -q "$svc")"
+      if [[ -z "$cid" ]]; then all_healthy=0; break; fi
+      state="$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")"
+      case "$state" in running\|healthy|running\|none) ;; *) all_healthy=0; break ;; esac
+    done
+    if [[ "$all_healthy" == 1 ]]; then healthy=1; break; fi
+    sleep 2
+  done
+  if [[ "$healthy" != 1 || "$(git rev-parse HEAD)" != "$expected" ]]; then
+    echo "AU01_POST_UPDATE_HEALTH_OR_SHA_FAILED_BACKUP_RETAINED" >&2
+    exit 1
+  fi
 fi
 echo "QIS01_SAFE_COMPOSE_UPDATE_COMPLETED"
 echo "SMTP/public TLS/DNS are not altered by the updater."

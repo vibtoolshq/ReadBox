@@ -11,11 +11,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  let body: { archive_url?: unknown; checksum_url?: unknown } = {};
+  let body: { archive_url?: unknown; checksum_url?: unknown; target_sha?: unknown } = {};
   try {
     body = (await request.json()) as {
       archive_url?: unknown;
       checksum_url?: unknown;
+      target_sha?: unknown;
     };
   } catch {
     return NextResponse.json(
@@ -40,6 +41,7 @@ export async function POST(request: NextRequest) {
     {
       archiveUrl: body.archive_url,
       checksumUrl: body.checksum_url,
+      targetSha: body.target_sha,
     },
     {
       actorId,
