@@ -90,6 +90,11 @@ def provision(domain):
         os.close(lockfd)
 
 class Handler(socketserver.StreamRequestHandler):
+    def setup(self):
+        # A stalled authenticated client must never monopolize the single worker.
+        self.request.settimeout(5)
+        super().setup()
+
     def handle(self):
         try:
             rawpeer = self.request.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
