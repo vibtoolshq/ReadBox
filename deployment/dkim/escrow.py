@@ -222,11 +222,12 @@ def publish_receipt(root: Path, domain: str, record: dict):
     tmp = destination.with_name(".escrow-" + secrets.token_hex(12))
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-        try:
-            with os.fdopen(fd, "wb") as out:
-                out.write(receipt_bytes(record))
-                out.flush()
-                os.fsync(out.fileno())
+        with os.fdopen(fd, "wb") as out:
+            out.write(receipt_bytes(record))
+            out.flush()
+            os.fsync(out.fileno())
+        # Host may run with umask 077; agent UID 1001 needs read-only access.
+        os.chmod(tmp, 0o644)
         os.link(tmp, destination, follow_symlinks=False)
     except FileExistsError:
         raise EscrowRefused("ESCROW_RECEIPT_CONFLICT") from None
