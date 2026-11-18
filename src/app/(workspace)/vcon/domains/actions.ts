@@ -4,6 +4,7 @@ import { env } from "@/config/env";
 import { requireAdminUser } from "@/core/auth/route-guards";
 import { getPrismaClient } from "@/core/database/client";
 import type { RoutingVerificationResult } from "@/core/dns/resolver";
+import { provisionDkimForDomain } from "@/core/dns/dkim-provision";
 import {
   checkDomainDns,
   createDomain,
@@ -39,6 +40,7 @@ function revalidateDomainPaths(uuid?: string) {
 export async function createDomainAction(input: {
   readonly name: string;
   readonly dnsConfirmed: boolean;
+  readonly autoDkim?: boolean;
 }): Promise<DomainActionResult<{ uuid: string; name: string }>> {
   const actor = await requireAdminUser();
   if (!env.databaseUrl) {
@@ -48,7 +50,7 @@ export async function createDomainAction(input: {
   const requestHeaders = await headers();
   const result = await createDomain(
     getPrismaClient() as unknown as DomainPrismaClient,
-    input,
+    { name: input.name, dnsConfirmed: input.dnsConfirmed },
     {
       actorId: actor.id,
       authSource: actor.authSource,
@@ -60,6 +62,20 @@ export async function createDomainAction(input: {
 
   if (result.ok) {
     revalidateDomainPaths(result.data.uuid);
+    if (input.autoDkim === true) {
+      try {
+        const dkim = await provisionDkimForDomain(
+          result.data.name, env.opendkimKeysRoot, true,
+        );
+        return { ...result, message: dkim.dns === "manual"
+          ? "Domain added; DKIM key created. Publish the TXT record manually."
+          : "Domain added; DKIM key and Cloudflare DNS provisioned." };
+      } catch {
+        // Domain creation is not reverted or repeated after an external DKIM failure.
+        return { ...result, message:
+          "Domain added. DKIM provisioning needs operator review; use Provision/Repair on the domain page." };
+      }
+    }
   }
 
   return result;

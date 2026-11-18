@@ -21,7 +21,7 @@ export interface DnsRecordsConfig {
 }
 
 const DEFAULT_UNAVAILABLE_DKIM =
-  "DKIM signing key is not configured for this domain.";
+  "DKIM public key is not provisioned for this domain.";
 
 function normalizeDnsHost(value: string): string {
   return value.trim().replace(/\.+$/, "").toLowerCase();
@@ -149,6 +149,14 @@ export function buildCloudflareZoneFile(
       continue;
     }
 
+    // DKIM RSA-2048 TXT must use <=255-octet character-string segments.
+    // DNS concatenates these segments to recover the original public key.
+    if (record.host.includes("._domainkey.") && cleanValue.startsWith("v=DKIM1;")) {
+      const chunks = cleanValue.match(/.{1,240}/g) ?? [];
+      lines.push(hostFqdn + "\t300\tIN\tTXT\t( " +
+        chunks.map((chunk) => JSON.stringify(chunk)).join(" ") + " )");
+      continue;
+    }
     const escapedTxt = cleanValue.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     lines.push(`${hostFqdn}\t300\tIN\tTXT\t"${escapedTxt}"`);
   }

@@ -42,6 +42,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      dkim-provisioner:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       DOCKER_RUNTIME: "true"
@@ -104,12 +106,16 @@ services:
 
       # Optional Release Check Settings
       UPDATE_GITHUB_REPO: ${UPDATE_GITHUB_REPO:-vibtools/ReadBox}
+      READBOX_CF_DNS_TOKEN: ${READBOX_CF_DNS_TOKEN:-}
+      READBOX_CF_DNS_ZONE_ID: ${READBOX_CF_DNS_ZONE_ID:-}
+      READBOX_CF_DNS_ZONE_NAME: ${READBOX_CF_DNS_ZONE_NAME:-}
     volumes:
       - readbox_vmail:/var/vmail
       - readbox_attachments:/var/lib/readbox/attachments
       - readbox_media:/var/lib/readbox/media
       - readbox_locks:/var/lock/readbox-provision
-      - readbox_opendkim:/etc/opendkim/keys
+      - readbox_opendkim:/etc/opendkim/keys:ro
+      - readbox_dkim_ipc:/run/readbox-dkim:ro
       - readbox_backup_ipc:/run/readbox-backup-agent:ro
       # AU-01: restricted HMAC Unix socket only; NOT the Docker socket.
       - readbox_update_ipc:/run/readbox-updater:ro
@@ -207,6 +213,31 @@ services:
     networks:
       - readbox_internal
 
+  # DKIM-01: no network, no SMTP signer, no DNS provider credentials.
+  # Only this container can mount persistent PRIVATE key material.
+  dkim-provisioner:
+    build:
+      context: .
+      dockerfile: deployment/dkim/Dockerfile
+    restart: unless-stopped
+    user: "1001:1001"
+    network_mode: "none"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    volumes:
+      - readbox_dkim_private:/var/lib/readbox-dkim/private
+      - readbox_opendkim:/etc/opendkim/keys
+      - readbox_dkim_ipc:/run/readbox-dkim
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import pathlib,stat; p=pathlib.Path('/run/readbox-dkim/agent.sock'); t=pathlib.Path('/run/readbox-dkim/access.token'); assert stat.S_ISSOCK(p.stat().st_mode) and stat.S_ISREG(t.stat().st_mode)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
   # R-03: inbound SMTP ONLY; no AUTH/587/465/IMAP or outbound relay.
   # Bind loopback by default; a separate approved VPS install may set
   # SMTP_BIND_ADDRESS=0.0.0.0 after public port/TLS/DNS checks.
@@ -273,6 +304,9 @@ volumes:
   readbox_media:
   readbox_locks:
   readbox_opendkim:
+  # DKIM-01: web mounts public-only keys; private material is never mounted there.
+  readbox_dkim_private:
+  readbox_dkim_ipc:
   readbox_postfix_queue:
   # BR-02: private Unix socket only; no Docker daemon mount.
   readbox_backup_ipc:

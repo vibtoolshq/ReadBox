@@ -10,7 +10,7 @@ export interface OpenDkimRecordResult {
 }
 
 const MISSING_DKIM_MESSAGE =
-  "DKIM signing key is not configured for this domain.";
+  "DKIM public key is not provisioned for this domain.";
 
 export function parseOpenDkimPublicKeyFile(
   content: string,

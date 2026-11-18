@@ -27,6 +27,7 @@ import {
   type DisplayDnsRecord,
 } from "@/components/vcon/dns-records-panel";
 import type { ExpectedDnsRecord } from "@/core/dns/records";
+import type { DkimStatus } from "@/core/dns/dkim-provision";
 import type {
   FullDnsVerificationResult,
   RoutingVerificationResult,
@@ -38,7 +39,7 @@ import type {
 import { RefreshCw, ShieldCheck, Star, Trash2, Zap } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 export interface DomainFormProps {
   readonly mode: "create" | "edit";
@@ -49,6 +50,7 @@ export interface DomainFormProps {
   readonly onCreate?: (input: {
     readonly name: string;
     readonly dnsConfirmed: boolean;
+    readonly autoDkim?: boolean;
   }) => Promise<DomainActionResult<{ uuid: string; name: string }>>;
   readonly onUpdateStatus?: (
     uuid: string,
@@ -131,6 +133,11 @@ export function DomainForm({
     initialDomain?.status === "active" ? "active" : "disabled",
   );
   const [dnsConfirmed, setDnsConfirmed] = useState(false);
+  const [autoDkim, setAutoDkim] = useState(false);
+  const [dkimPublish, setDkimPublish] = useState(true);
+  const [dkimStatus, setDkimStatus] = useState<DkimStatus | null>(null);
+  const [dkimError, setDkimError] = useState<string | null>(null);
+  const [dkimBusy, setDkimBusy] = useState(false);
   const [records, setRecords] = useState<readonly DisplayDnsRecord[]>(
     initialRecords,
   );
@@ -150,6 +157,51 @@ export function DomainForm({
     null,
   );
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+
+  useEffect(() => {
+    if (!initialDomain?.uuid) return;
+    let active = true;
+    fetch("/api/vcon/domains/" + initialDomain.uuid + "/dkim", { cache: "no-store" })
+      .then(async (res) => res.ok ? (await res.json()) as DkimStatus : null)
+      .then((data) => { if (active) setDkimStatus(data); })
+      .catch(() => { if (active) setDkimStatus(null); });
+    return () => { active = false; };
+  }, [initialDomain?.uuid]);
+
+  async function handleProvisionDkim() {
+    if (!initialDomain || dkimBusy) return;
+    setDkimBusy(true);
+    setDkimError(null);
+    try {
+      const response = await fetch("/api/vcon/domains/" + initialDomain.uuid + "/dkim", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ publish: dkimPublish }),
+      });
+      const result = await response.json() as {
+        ok?: boolean; code?: string; provision?: string; dns?: string;
+      };
+      if (!response.ok || !result.ok) {
+        setDkimError(result.code ?? "DKIM provisioning failed.");
+        notify.error("DKIM provisioning requires operator review.");
+        return;
+      }
+      notify.success(result.dns === "manual"
+        ? "DKIM public key ready. Copy/publish the TXT record manually."
+        : "DKIM TXT record provisioned. DNS propagation may take time.");
+      const [statusResult, previewResult] = await Promise.all([
+        fetch("/api/vcon/domains/" + initialDomain.uuid + "/dkim", { cache: "no-store" }),
+        onPreviewDns(initialDomain.name),
+      ]);
+      if (statusResult.ok) setDkimStatus(await statusResult.json() as DkimStatus);
+      if (previewResult.ok && previewResult.records) setRecords(previewResult.records);
+      router.refresh();
+    } catch {
+      setDkimError("DKIM provisioning is temporarily unavailable.");
+      notify.error("DKIM provisioning is temporarily unavailable.");
+    } finally {
+      setDkimBusy(false);
+    }
+  }
 
   async function handlePreviewDns() {
     if (previewLoading) return;
@@ -192,7 +244,7 @@ export function DomainForm({
       if (!onCreate) return;
       setPending(true);
       try {
-        const result = await onCreate({ name, dnsConfirmed });
+        const result = await onCreate({ name, dnsConfirmed, autoDkim });
         if (!result.ok) {
           setFormError(result.error);
           if (result.fieldErrors) setFieldErrors(result.fieldErrors);
@@ -544,6 +596,30 @@ export function DomainForm({
               />
             )}
 
+            {!isCreate && initialDomain ? (
+              <div className="space-y-2 border-t border-border pt-3" data-testid="dkim-provisioning">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs text-muted-foreground">
+                    DKIM key: {dkimStatus?.key ?? "Unknown"} · DNS: {dkimStatus?.dns ?? "Unknown"}
+                    {" · "}Signing: inactive (inbound-only)
+                  </div>
+                  <Button type="button" size="sm" variant="outline"
+                    disabled={dkimBusy || pending}
+                    onClick={() => void handleProvisionDkim()}>
+                    {dkimBusy ? "Provisioning..." : "Provision / Repair DKIM"}
+                  </Button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="dkim-publish" checked={dkimPublish}
+                    onChange={(event) => setDkimPublish(event.target.checked)} />
+                  <Label htmlFor="dkim-publish" className="font-normal">
+                    Publish DKIM TXT to configured Cloudflare zone (otherwise manual copy)
+                  </Label>
+                </div>
+                {dkimError ? <AlertBanner variant="warning">{dkimError}</AlertBanner> : null}
+              </div>
+            ) : null}
+
             {isCreate ? (
               <div className="space-y-1.5 border-t border-border pt-3">
                 <div className="flex items-start gap-2">
@@ -565,6 +641,13 @@ export function DomainForm({
                   >
                     I have reviewed the DNS records above and understand routing
                     verification is required before enabling mail delivery.
+                  </Label>
+                </div>
+                <div className="flex items-start gap-2">
+                  <Checkbox id="domain-dkim-auto" checked={autoDkim}
+                    onChange={(event) => setAutoDkim(event.target.checked)} />
+                  <Label htmlFor="domain-dkim-auto" className="font-normal">
+                    Provision DKIM key after domain creation (publish automatically only if Cloudflare configured)
                   </Label>
                 </div>
                 {fieldErrors.dnsConfirmed ? (
