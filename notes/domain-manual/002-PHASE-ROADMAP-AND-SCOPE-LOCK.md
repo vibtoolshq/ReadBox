@@ -10,7 +10,7 @@
 - No VPS deployment, live DNS import, R2 mutation, key rotation, restore, secret exposure, tag or release during MD-01 and MD-02.
 
 ## MD-01 — Explicit checkbox beside Cloudflare zone; keep legacy manual path
-**Goal:** Show **Manual Mode (other Cloudflare account)** directly in Cloudflare Zone panel. ON hides/disables required zone selection and automatic setup; preserves review checkbox; Save creates disabled domain via **existing** manual contract. OFF retains existing selected-zone automatic setup and auto default. The saved-domain `Provision / Repair DKIM` with Publish unchecked remains the documented manual completion step until MD-02.
+**Goal:** Show **Manual Mode (other Cloudflare account)** directly in Cloudflare Zone panel. The panel and Manual Mode checkbox remain visible at all times in create mode; ON hides/disables only the zone selector and disables automatic provider setup, while preserving the review checkbox; Save creates disabled domain via **existing** manual contract. OFF retains existing selected-zone automatic setup and auto default. The saved-domain `Provision / Repair DKIM` with Publish unchecked remains the documented manual completion step until MD-02.
 
 **EXACT source allowlist (contract sections only):**
 - `src/components/vcon/domain-form.tsx` — local mode state, checkbox, zone panel, submit validation/payload, contextual help; no other sections.
